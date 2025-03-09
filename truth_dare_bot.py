@@ -14,22 +14,21 @@ from asyncio import Lock
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.ERROR)
 
 
-# Your bot token
+# 获取BOT_TOKEN
 load_dotenv(".env")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("错误: 未在 .env 文件或环境变量中找到 TELEGRAM_BOT_TOKEN！")
 
-# Game state management
+# 建立字典和组
 games = {}
 last_roll_time = {}
 
-# 全局锁
+# 加全局锁
 games_lock = Lock()
 last_roll_lock = Lock()
 
 
-# Command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text('欢迎使用真心话大冒险 Bot！使用 /create 开始游戏。')
 
@@ -130,7 +129,7 @@ async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         
         game = games[chat_id][thread_id]
 
-    # Step 1: Check if the sender is the host
+    # Step 1: 检查是否是主持人
         if user.id != game['host'].id:
             if user.id in game['participants']:
                 game['participants'].remove(user.id)
@@ -140,7 +139,7 @@ async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 await update.message.reply_text('您不在游戏中。')
             return
 
-    # Step 2: Host sending /leave without any reply or mention
+    # Step 2: 告知主持人无法自行离开
         await update.message.reply_text('您作为游戏主持人无法离开游戏，如果需要更换主持人请先（/stop）结束游戏，再由新主持人（/create）开始游戏')
 
 async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -219,7 +218,7 @@ async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 await asyncio.sleep(1)
         else:
-            # 循环正常结束（retry_count >= max_retries）
+            # 最多重复5次，以免出现游戏人数大于100后，永远无法得出结果
             await update.message.reply_text("多次平局，游戏终止，请手动处理。")
             return
         
@@ -253,10 +252,8 @@ async def admin_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             del last_roll_time[chat_id][thread_id]
 
 def main():
-    # Set up the Application
     application = Application.builder().token(TOKEN).build()
 
-    # Register command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("create", create_game))
@@ -266,7 +263,6 @@ def main():
     application.add_handler(CommandHandler("roll", roll_dice))
     application.add_handler(CommandHandler("adminstop", admin_stop))
 
-    # Start the Bot
     application.run_polling()
 
 if __name__ == '__main__':
