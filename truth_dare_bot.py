@@ -52,7 +52,8 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     thread_id = getattr(update.message, "message_thread_id", 0)  # 兼容话题群组
     async with games_lock:
         if chat_id in games and thread_id in games[chat_id]:
-            await update.message.reply_text('游戏已经在进行中。')
+            host_name = games[chat_id][thread_id]['host'].full_name
+            await update.message.reply_text(f'群里已经有一个由（{host_name}）主持的游戏啦。')
         else:
             if chat_id not in games:
                 games[chat_id] = {}
@@ -73,7 +74,8 @@ async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # 2. 检查用户权限
         game = games[chat_id][thread_id]
         if user.id != game['host'].id:
-            await update.message.reply_text('只有主持人可以使用/stop命令。')
+            host_name = game['host'].full_name
+            await update.message.reply_text(f'只有本次游戏的主持人（{host_name}）可以结束游戏。')
             return
 
         # 3. 删除游戏数据
@@ -165,7 +167,8 @@ async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # 检查主持人权限
         if user.id != game['host'].id:
-            await update.message.reply_text('只有主持人可以掷骰子。')
+            host_name = game['host'].full_name
+            await update.message.reply_text(f'只有本次游戏的主持人（{host_name}）可以掷骰子。')
             return
 
         # 检查参与者数量
