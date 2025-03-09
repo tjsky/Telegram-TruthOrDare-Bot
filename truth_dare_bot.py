@@ -5,8 +5,6 @@ import logging
 import asyncio
 from telegram import Update, ChatMemberAdministrator, ChatMemberOwner
 from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.constants import ParseMode
-from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
 from asyncio import Lock
 
@@ -14,17 +12,17 @@ from asyncio import Lock
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.ERROR)
 
 
-# 获取BOT_TOKEN
+# 配置BOT_TOKEN
 load_dotenv(".env")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("错误: 未在 .env 文件或环境变量中找到 TELEGRAM_BOT_TOKEN！")
 
-# 建立字典和组
+# 记录
 games = {}
 last_roll_time = {}
 
-# 加全局锁
+# 全局锁
 games_lock = Lock()
 last_roll_lock = Lock()
 
@@ -51,7 +49,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
-    thread_id = getattr(update.message, "message_thread_id", 0)  # Use 0 for non-topic messages
+    thread_id = getattr(update.message, "message_thread_id", 0)  # 兼容话题群组
     async with games_lock:
         if chat_id in games and thread_id in games[chat_id]:
             await update.message.reply_text('游戏已经在进行中。')
@@ -67,12 +65,12 @@ async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
     async with games_lock:
-        # 1. 先检查游戏是否存在
+        # 1. 检查游戏是否存在
         if chat_id not in games or thread_id not in games[chat_id]:
             await update.message.reply_text('当前没有进行中的游戏。')
             return
 
-        # 2. 再检查用户权限
+        # 2. 检查用户权限
         game = games[chat_id][thread_id]
         if user.id != game['host'].id:
             await update.message.reply_text('只有主持人可以使用/stop命令。')
@@ -80,7 +78,7 @@ async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # 3. 删除游戏数据
         del games[chat_id][thread_id]
-        if not games[chat_id]:  # 清理空群组
+        if not games[chat_id]:  
             del games[chat_id]
         await update.message.reply_text('游戏已结束。')
 
@@ -129,7 +127,6 @@ async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         
         game = games[chat_id][thread_id]
 
-    # Step 1: 检查是否是主持人
         if user.id != game['host'].id:
             if user.id in game['participants']:
                 game['participants'].remove(user.id)
@@ -139,7 +136,6 @@ async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 await update.message.reply_text('您不在游戏中。')
             return
 
-    # Step 2: 告知主持人无法自行离开
         await update.message.reply_text('您作为游戏主持人无法离开游戏，如果需要更换主持人请先（/stop）结束游戏，再由新主持人（/create）开始游戏')
 
 async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -148,13 +144,15 @@ async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     thread_id = getattr(update.message, "message_thread_id", 0)
     current_time = time.time()
     retry_count = 0
-    max_retries = 5
-    
+    max_retries = 5   
+
+    # 平局最多重试5次
+
     async with last_roll_lock:
         if chat_id in last_roll_time and thread_id in last_roll_time[chat_id]:
             last_roll = last_roll_time[chat_id][thread_id]
             if current_time - last_roll < 10:
-                remaining = 10 - int(current_time - last_roll)
+                remaining = 10 - int(current_time - last_roll) # 最小间隔10秒
                 await update.message.reply_text(f"⏳ 你扔的太快了吧，请等待 {remaining} 秒")
                 return      
 
@@ -177,7 +175,7 @@ async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         while retry_count < max_retries:
 
-            # 🎲 掷骰子 🎲
+            #  掷骰子 
             rolls = {
                 user_id: random.randint(1, 100)
                 for user_id in games[chat_id][thread_id]['participants']
@@ -203,29 +201,23 @@ async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if len(max_users) == 1 and len(min_users) == 1:
                 winner_info = games[chat_id][thread_id]['participant_info'][max_users[0]]
                 loser_info = games[chat_id][thread_id]['participant_info'][min_users[0]]
-                winner_name = f"[{escape_markdown(winner_info.user.full_name, version=2)}](tg://user?id={max_users[0]})"
-                loser_name = f"[{escape_markdown(loser_info.user.full_name, version=2)}](tg://user?id={min_users[0]})"
-                await update.message.reply_text(
-                    f"🎲 结果 🎲\n{results}\n\n🏆 胜利者: {winner_name}\n😵 失败者: {loser_name}",
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
+                winner_name = f"@{winner_info['username']}" if winner_info['username'] else winner_info['full_name']
+                loser_name = f"@{loser_info['username']}" if loser_info['username'] else loser_info['full_name']
+                await update.message.reply_text(f"{results}\n\n🏆 胜利者: {winner_name}\n😵 失败者: {loser_name}")
                 break
             else:
                 retry_count += 1
-                await update.message.reply_text(
-                    f"🎲 结果 🎲\n{results}\n\n⚠️ 出现平局！重新掷骰子...",
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
+                await update.message.reply_text(f"{results}\n\n⚠️ 出现平局！重新掷骰子...")
                 await asyncio.sleep(1)
         else:
-            # 最多重复5次，以免出现游戏人数大于100后，永远无法得出结果
+            # 多次平局后结束自动重roll
             await update.message.reply_text("多次平局，游戏终止，请手动处理。")
             return
         
     async with last_roll_lock:
             if chat_id not in last_roll_time:
                 last_roll_time[chat_id] = {}
-            last_roll_time[chat_id][thread_id] = time.time()  # 记录成功执行时间
+            last_roll_time[chat_id][thread_id] = time.time()  
     
 
 async def admin_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
