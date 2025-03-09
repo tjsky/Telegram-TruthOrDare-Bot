@@ -35,7 +35,7 @@ Demo：[真心话大冒险辅助Bot](https://t.me/zh_sexting_TOD_bot)
 
 ### 三、部署运行
 1. 修改env
-打开.env_example，将自己机器人的Token、账号的API_ID/HASH、管理群组ID和管理员ID补全。 另存.env_example为.env
+打开.env_example，将自己机器人的Token补全。 另存.env_example为.env
 
 2. 获取代码/构建python venv
    
@@ -48,13 +48,13 @@ pip install -r requirements.txt
 ```
 
 3. 执行
-`python truth_dare_bot.py`
+`python3 truth_dare_bot.py`
 
 PS: 正式运营，还是需要类似PM2、supervisor之类的进程管理工具，来实现不间断运行、自动重启、失效重启等功能。
 
 ### 关于
 - 本产品基于Apache协议开源。
-- 原始作者不是我本人 ( @tjsky )，项目为代友发布，我只写了这个介绍，补全了项目部署需要的文件，我们都不是职业程序员，纯粹是业余写点东西，有问题别太理直气壮的跑来下命令。
+- 项目为代友发布，我只写了这个介绍，补全了项目部署需要的文件。
 - 随意Fork，记得保留关于的内容。
 - 服务器推荐RackNerd或CloudCone的就行。Demo就在CloudCone上运行，这款就够：3核2G--年25刀
 - 其实实在不会部署的话，用Demo 就行，理论上应该能支撑挺高的并发的。
