@@ -36,12 +36,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/stop - 结束当前的游戏(仅主持人)\n"
         "/adminstop - 结束当前的游戏(仅群管理)\n"
         "/join - 加入当前游戏\n"
-        "/leave - 自己离开当前游戏\n"
+        "/leave - 离开当前游戏\n"
         "/roll - 投骰子 (仅主持人)\n"
         "/help - 显示帮助消息\n\n"
         "注意：\n"
         "- 只有主持人可以开始、结束游戏，进行 /roll 投掷骰子。\n"
         "- 主持人默认不加入游戏，如果主持人也参与投骰子，请自行用 /join 加入游戏。\n"
+        "- 主持人可以通过对玩家消息回复 /leave 将其移出游戏\n"
         "- 如果无法由主持人结束游戏时，群内管理也可以用 /adminstop 结束游戏。"
     )
     await update.message.reply_text(help_text)
@@ -58,7 +59,7 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if chat_id not in games:
                 games[chat_id] = {}
             games[chat_id][thread_id] = {'participants': set(), 'host': user, 'participant_info': {}}
-            await update.message.reply_text('新游戏已创建！使用 /join 加入游戏。')
+            await update.message.reply_text('新游戏已创建！使用 /join 加入游戏。\n开始游戏的人会充当主持人，负责本局游戏的管理。\n当不能负责时，请及时 /stop 结束游戏。')
 
 async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -75,7 +76,7 @@ async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         game = games[chat_id][thread_id]
         if user.id != game['host'].id:
             host_name = game['host'].full_name
-            await update.message.reply_text(f'只有本次游戏的主持人（{host_name}）可以结束游戏。')
+            await update.message.reply_text(f'只有本次游戏的主持人（{host_name}）可以结束游戏。\n 如果TA这会儿不在，可呼叫群管理结束游戏')
             return
 
         # 3. 删除游戏数据
@@ -107,20 +108,22 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if user.id in game["participants"]:
                 await update.message.reply_text(f"{user.full_name} 已经在游戏中。")
             else:
+                host_name = games[chat_id][thread_id]['host'].full_name
                 game["participants"].add(user.id)
                 game["participant_info"][user.id] = {
                     "full_name": user.full_name,
                     "username": user.username
                 }
-                await update.message.reply_text(f"{user.full_name} 已加入游戏。")
+                await update.message.reply_text(f"{user.full_name} 已加入由（{host_name}）主持的游戏。")
         else:
-            await update.message.reply_text("当前没有进行中的游戏。使用 /create 开始一个新游戏。")
+            await update.message.reply_text("当前没有进行中的游戏。使用 /create 开始一个新游戏。\n开始游戏的人会充当主持人，负责本局游戏的管理。\n当不能负责时，请及时 /stop 结束游戏。")
 
 
 async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
     thread_id = getattr(update.message, "message_thread_id", 0)
+    replied_message = update.message.reply_to_message  # 获取被回复的消息
 
     async with games_lock:
         if chat_id not in games or thread_id not in games[chat_id]:
@@ -128,8 +131,29 @@ async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
         
         game = games[chat_id][thread_id]
+        host_id = game['host'].id
 
-        if user.id != game['host'].id:
+        # 主持人通过回复他人消息踢人
+        if user.id == host_id and replied_message:
+            target_user = replied_message.from_user
+            if target_user.id == host_id:
+                await update.message.reply_text("主持人不能自己移除自己。")
+                return
+
+            if target_user.id in game['participants']:
+                host_name = games[chat_id][thread_id]['host'].full_name
+                game['participants'].remove(target_user.id)
+                del game['participant_info'][target_user.id]
+                await update.message.reply_text(
+                    f"主持人（{host_name}）已将 {target_user.full_name} 移出游戏。"
+                )
+                return
+            else:
+                await update.message.reply_text("该用户不在游戏中。")
+                return
+
+        # 普通用户自己离开
+        if user.id != host_id:
             if user.id in game['participants']:
                 game['participants'].remove(user.id)
                 del game['participant_info'][user.id]
@@ -138,8 +162,12 @@ async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 await update.message.reply_text('您不在游戏中。')
             return
 
-        await update.message.reply_text('您作为游戏主持人无法离开游戏，如果需要更换主持人请先（/stop）结束游戏，再由新主持人（/create）开始游戏')
-
+        # 主持人单独发送/leave
+        await update.message.reply_text(
+            '您作为游戏主持人无法离开游戏，'
+            '如果需要更换主持人请先（/stop）结束游戏，'
+            '再由新主持人（/create）开始游戏'
+        )
 async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
