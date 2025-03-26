@@ -95,6 +95,7 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     thread_id = getattr(update.message, "message_thread_id", 0)
     user = update.effective_user
+    message_id = update.message.message_id
 
     async with games_lock:
         if chat_id in games and thread_id in games[chat_id]:
@@ -108,13 +109,24 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if user.id in game["participants"]:
                 await update.message.reply_text(f"{user.full_name} 已经在游戏中。")
             else:
+                chat_id_for_link = chat_id
+                if isinstance(chat_id_for_link, int) and chat_id_for_link < 0:
+                    chat_id_str = str(chat_id_for_link)[4:]  # 处理超级群ID
+                else:
+                    chat_id_str = str(chat_id_for_link)
+                message_link = f"https://t.me/c/{chat_id_str}/{message_id}"
+
                 host_name = games[chat_id][thread_id]['host'].full_name
                 game["participants"].add(user.id)
                 game["participant_info"][user.id] = {
                     "full_name": user.full_name,
-                    "username": user.username
+                    "username": user.username,
+                    "join_message_link": message_link
                 }
                 await update.message.reply_text(f"{user.full_name} 已加入由（{host_name}）主持的游戏。")
+                if not user.username:
+                    await update.message.reply_text("您的账号没有设置用户名，根据TG的规则 bot 将无法在游戏中对您做出@提醒，请自行注意游戏结果。")
+
         else:
             await update.message.reply_text("当前没有进行中的游戏。使用 /create 开始一个新游戏。\n开始游戏的人会充当主持人，负责本局游戏的管理。\n当不能负责时，请及时 /stop 结束游戏。")
 
@@ -182,9 +194,19 @@ async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if chat_id in last_roll_time and thread_id in last_roll_time[chat_id]:
             last_roll = last_roll_time[chat_id][thread_id]
             if current_time - last_roll < 10:
+                async with games_lock:
+                    game = games.get(chat_id, {}).get(thread_id)
+                    if not game:
+                        return
                 remaining = 10 - int(current_time - last_roll) # 最小间隔10秒
-                await update.message.reply_text(f"⏳ 你扔的太快了吧，请等待 {remaining} 秒")
-                return      
+                remaining = max(0, remaining)
+                if user.id != game['host'].id:
+                    host_name = game['host'].full_name
+                    await update.message.reply_text(f'只有本次游戏的主持人（{host_name}）可以掷骰子。')
+                    return
+                else:
+                    await update.message.reply_text(f"⏳ 你扔的太快了吧，请等待 {remaining} 秒")
+                    return 
 
     async with games_lock:
         if chat_id not in games or thread_id not in games[chat_id]:
@@ -212,12 +234,20 @@ async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 for user_id in games[chat_id][thread_id]['participants']
             }
 
+            def get_user_display(user_id):
+                user_info = game['participant_info'][user_id]
+                if user_info['username']:
+                    return f'<a href="{user_info["join_message_link"]}">🔗 </a>{user_info["full_name"]}'
+                else:
+                    return f'<a href="{user_info["join_message_link"]}">🔗 </a>{user_info["full_name"]}'
+
+
             participant_count = len(rolls)
 
             results = (
                 f"🎲 本局玩家共（{participant_count}人） 🎲\n\n"
                 + "\n".join([
-                    f"{games[chat_id][thread_id]['participant_info'][user_id]['full_name']}: {score}"
+                    f"{get_user_display(user_id)}: {score}"
                     for user_id, score in rolls.items()
                 ])
             )
@@ -230,15 +260,21 @@ async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             # 处理平局（自动重掷）
             if len(max_users) == 1 and len(min_users) == 1:
-                winner_info = games[chat_id][thread_id]['participant_info'][max_users[0]]
-                loser_info = games[chat_id][thread_id]['participant_info'][min_users[0]]
+                winner_info = game['participant_info'][max_users[0]]
+                loser_info = game['participant_info'][min_users[0]]
                 winner_name = f"@{winner_info['username']}" if winner_info['username'] else winner_info['full_name']
                 loser_name = f"@{loser_info['username']}" if loser_info['username'] else loser_info['full_name']
-                await update.message.reply_text(f"{results}\n\n🏆 胜利者: {winner_name}\n😵 失败者: {loser_name}")
+                await update.message.reply_text(
+                    f"{results}\n\n🏆 胜利者: {winner_name}\n😵 失败者: {loser_name}",
+                    parse_mode='HTML'
+                )
                 break
             else:
                 retry_count += 1
-                await update.message.reply_text(f"{results}\n\n⚠️ 出现平局！重新掷骰子...")
+                await update.message.reply_text(
+                    f"{results}\n\n⚠️ 出现平局！重新掷骰子...", 
+                    parse_mode='HTML'
+                )
                 await asyncio.sleep(1)
         else:
             # 多次平局后结束自动重roll
