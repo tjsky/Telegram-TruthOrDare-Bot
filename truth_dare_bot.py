@@ -4,13 +4,12 @@ import time
 import logging
 import asyncio
 from telegram import Update, ChatMemberAdministrator, ChatMemberOwner
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackContext
 from dotenv import load_dotenv
-from asyncio import Lock
+from asyncio import Lock, Queue
 
 # 配置日志
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.ERROR)
-
 
 # 配置BOT_TOKEN
 load_dotenv(".env")
@@ -25,6 +24,17 @@ last_roll_time = {}
 # 全局锁
 games_lock = Lock()
 last_roll_lock = Lock()
+
+# 消息队列和定时器管理
+message_queue = Queue()
+timer_queue = Queue()
+
+# 定时器常量
+TIMER_INTERVAL = 60  # 检查间隔(秒)
+WARNING_10_MIN = 600 # 第一次提醒间隔
+WARNING_20_MIN = 1200 # 第二次提醒间隔
+GAME_TIMEOUT = 1800 # 第三次结束游戏间隔
+MAX_MESSAGES_PER_SECOND = 28  # 限制提醒的发送速率，以防撞上TG的限制。
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -52,6 +62,8 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id
     user = update.effective_user
     thread_id = getattr(update.message, "message_thread_id", 0)  # 兼容话题群组
+    current_time = time.time()
+    
     async with games_lock:
         if chat_id in games and thread_id in games[chat_id]:
             host_name = games[chat_id][thread_id]['host'].full_name
@@ -60,7 +72,16 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             if chat_id not in games:
                 games[chat_id] = {}
-            games[chat_id][thread_id] = {'participants': set(), 'host': user, 'participant_info': {}}
+            
+            # 添加游戏计时器相关字段
+            games[chat_id][thread_id] = {
+                'participants': set(),
+                'host': user,
+                'participant_info': {},
+                'game_start_time': current_time,
+                'host_last_active': current_time,
+                'timer_state': 0
+            }
             await update.message.reply_text('新游戏已创建！使用 /join 加入游戏。\n开始游戏的人会充当主持人，负责本局游戏的管理。\n当不能负责时，请及时 /stop 结束游戏。')
 
 async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -183,6 +204,7 @@ async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             '如果需要更换主持人请先（/stop）结束游戏，'
             '再由新主持人（/createnewgame）开始游戏'
         )
+        
 async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -191,8 +213,15 @@ async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     retry_count = 0
     max_retries = 5   
 
-    # 平局最多重试5次
+    # 更新主持人最后活跃时间和重置计时状态
+    async with games_lock:
+        if chat_id in games and thread_id in games[chat_id]:
+            game = games[chat_id][thread_id]
+            if user.id == game['host'].id:
+                game['host_last_active'] = current_time
+                game['timer_state'] = 0  # 重置计时状态
 
+    # 平局最多重试5次
     async with last_roll_lock:
         if chat_id in last_roll_time and thread_id in last_roll_time[chat_id]:
             last_roll = last_roll_time[chat_id][thread_id]
@@ -313,9 +342,121 @@ async def admin_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if chat_id in last_roll_time and thread_id in last_roll_time[chat_id]:
             del last_roll_time[chat_id][thread_id]
 
+async def game_timer_check(context: CallbackContext) -> None:
+    """每分钟检查所有游戏的计时器状态"""
+    current_time = time.time()
+    tasks = []
+    
+    # 快速收集需要处理的任务而不持有锁
+    async with games_lock:
+        active_games = []
+        for chat_id, threads in games.items():
+            for thread_id, game in threads.items():
+                active_games.append((
+                    chat_id,
+                    thread_id,
+                    game['game_start_time'],
+                    game['host_last_active'],
+                    game.get('timer_state', 0)
+                ))
+    
+    # 并行处理每个游戏的状态
+    for chat_id, thread_id, start_time, last_active, timer_state in active_games:
+        elapsed_time = current_time - start_time
+        inactive_time = current_time - last_active
+        timer_key = (chat_id, thread_id)
+        
+        # 10分钟提醒
+        if WARNING_10_MIN <= elapsed_time < WARNING_20_MIN and inactive_time >= WARNING_10_MIN:
+            if timer_state < 10:
+                await timer_queue.put((
+                    chat_id, thread_id, 
+                    "⏰ 本轮游戏已经过去10分钟咯",
+                    10
+                ))
+        
+        # 20分钟提醒
+        elif WARNING_20_MIN <= elapsed_time < GAME_TIMEOUT and inactive_time >= WARNING_20_MIN:
+            if timer_state < 20:
+                await timer_queue.put((
+                    chat_id, thread_id,
+                    "⏰ 本轮游戏已经过去20分钟咯，如果超过30分钟主持人无操作，本次游戏将自动结束",
+                    20
+                ))
+        
+        # 30分钟超时自动结束
+        elif inactive_time >= GAME_TIMEOUT:
+            await timer_queue.put((
+                chat_id, thread_id,
+                "⏰ 超过30分钟无操作，游戏已自动结束",
+                30
+            ))
+
+async def timer_task_processor():
+    """处理定时器任务队列"""
+    while True:
+        try:
+            # 获取任务并处理
+            chat_id, thread_id, text, timer_state = await timer_queue.get()
+            
+            # 更新游戏状态
+            async with games_lock:
+                if chat_id in games and thread_id in games[chat_id]:
+                    game = games[chat_id][thread_id]
+                    
+                    if timer_state == 30:  # 结束游戏
+                        del games[chat_id][thread_id]
+                        if not games[chat_id]:
+                            del games[chat_id]
+                        
+                        async with last_roll_lock:
+                            if chat_id in last_roll_time and thread_id in last_roll_time[chat_id]:
+                                del last_roll_time[chat_id][thread_id]
+                                if not last_roll_time[chat_id]:
+                                    del last_roll_time[chat_id]
+                    else:  # 更新计时状态
+                        game['timer_state'] = timer_state
+            
+            # 将消息加入发送队列
+            await message_queue.put((chat_id, thread_id, text))
+            
+        except Exception as e:
+            logging.error(f"定时任务处理错误: {e}")
+            await asyncio.sleep(1)
+
+async def message_queue_sender(context: CallbackContext):
+    """以可控速率发送队列中的消息"""
+    while True:
+        messages_to_send = []
+        start_time = time.time()
+        
+        # 批量获取消息（最多MAX_MESSAGES_PER_SECOND条）
+        for _ in range(MAX_MESSAGES_PER_SECOND):
+            if not message_queue.empty():
+                messages_to_send.append(await message_queue.get())
+        
+        # 发送消息
+        for chat_id, thread_id, text in messages_to_send:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    message_thread_id=thread_id if thread_id != 0 else None,
+                    text=text
+                )
+            except Exception as e:
+                logging.error(f"消息发送失败: {e}")
+        
+        # 控制速率
+        elapsed = time.time() - start_time
+        if elapsed < 1.0 and messages_to_send:
+            await asyncio.sleep(1.0 - elapsed)
+        elif not messages_to_send:
+            await asyncio.sleep(0.5)
+
 def main():
     application = Application.builder().token(TOKEN).build()
 
+    # 添加命令
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("createnewgame", create_game))
@@ -324,6 +465,24 @@ def main():
     application.add_handler(CommandHandler("leave", leave_game))
     application.add_handler(CommandHandler("roll", roll_dice))
     application.add_handler(CommandHandler("adminstop", admin_stop))
+    
+    # 定时任务
+    application.job_queue.run_repeating(
+        game_timer_check, 
+        interval=TIMER_INTERVAL, 
+        first=0
+    )
+    
+    # 队列处理器
+    application.job_queue.run_once(
+        lambda ctx: asyncio.create_task(timer_task_processor()), 
+        when=0
+    )
+    
+    application.job_queue.run_once(
+        lambda ctx: asyncio.create_task(message_queue_sender(ctx)), 
+        when=0
+    )
 
     application.run_polling()
 
