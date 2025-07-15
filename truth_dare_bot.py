@@ -28,11 +28,11 @@ last_roll_lock = Lock()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text('欢迎使用真心话大冒险 Bot！使用 /create 开始游戏。')
+    await update.message.reply_text('欢迎使用真心话大冒险 Bot！使用 /createnewgame 开始游戏。')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
-        "/create - 开始一个新的真心话大冒险游戏\n"
+        "/createnewgame - 开始一个新的真心话大冒险游戏\n"
         "/stop - 结束当前的游戏(仅主持人)\n"
         "/adminstop - 结束当前的游戏(仅群管理)\n"
         "/join - 加入当前游戏\n"
@@ -43,7 +43,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- 只有主持人可以开始、结束游戏，进行 /roll 投掷骰子。\n"
         "- 主持人默认不加入游戏，如果主持人也参与投骰子，请自行用 /join 加入游戏。\n"
         "- 主持人可以通过对玩家消息回复 /leave 将其移出游戏\n"
-        "- 如果无法由主持人结束游戏时，群内管理也可以用 /adminstop 结束游戏。"
+        "- 如果无法由主持人结束游戏时，群内管理可以用 /adminstop 结束游戏。\n"
+        "- Bot需要管理员权限中的「删除消息」权限，以正确识别群内成员并管理游戏。"
     )
     await update.message.reply_text(help_text)
 
@@ -54,7 +55,8 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     async with games_lock:
         if chat_id in games and thread_id in games[chat_id]:
             host_name = games[chat_id][thread_id]['host'].full_name
-            await update.message.reply_text(f'群里已经有一个由（{host_name}）主持的游戏啦。')
+            host_id = games[chat_id][thread_id]['host'].id
+            await update.message.reply_text(f'群里已经有一个由（{host_name}：{host_id}）主持的游戏啦。')
         else:
             if chat_id not in games:
                 games[chat_id] = {}
@@ -76,7 +78,8 @@ async def stop_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         game = games[chat_id][thread_id]
         if user.id != game['host'].id:
             host_name = game['host'].full_name
-            await update.message.reply_text(f'只有本次游戏的主持人（{host_name}）可以结束游戏。\n 如果TA这会儿不在，可呼叫群管理结束游戏')
+            host_id = game['host'].id
+            await update.message.reply_text(f'只有本次游戏的主持人（{host_name}：{host_id}）可以结束游戏。\n 如果TA这会儿不在，可呼叫群管理结束游戏')
             return
 
         # 3. 删除游戏数据
@@ -128,7 +131,7 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await update.message.reply_text("您的账号没有设置用户名，根据TG的规则 bot 将无法在游戏中对您做出@提醒，请自行注意游戏结果。")
 
         else:
-            await update.message.reply_text("当前没有进行中的游戏。使用 /create 开始一个新游戏。\n开始游戏的人会充当主持人，负责本局游戏的管理。\n当不能负责时，请及时 /stop 结束游戏。")
+            await update.message.reply_text("当前没有进行中的游戏。使用 /createnewgame 开始一个新游戏。\n开始游戏的人会充当主持人，负责本局游戏的管理。\n当不能负责时，请及时 /stop 结束游戏。")
 
 
 async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -178,7 +181,7 @@ async def leave_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(
             '您作为游戏主持人无法离开游戏，'
             '如果需要更换主持人请先（/stop）结束游戏，'
-            '再由新主持人（/create）开始游戏'
+            '再由新主持人（/createnewgame）开始游戏'
         )
 async def roll_dice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -315,7 +318,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("create", create_game))
+    application.add_handler(CommandHandler("createnewgame", create_game))
     application.add_handler(CommandHandler("stop", stop_game))
     application.add_handler(CommandHandler("join", join_game))
     application.add_handler(CommandHandler("leave", leave_game))
